@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Mobile Enhanced
 // @namespace    reddit-mobile-enhanced
-// @version      1.1.2
+// @version      1.2.0
 // @description  Narwhal-ähnliches Reddit im mobilen Browser: eigene Kommentaransicht (komplett ausgeklappt, farbige Ebenen, Abstimmen, Antworten, Suche), Toolbar, Gesten, OLED-Schwarz, ohne Werbung
 // @match        https://www.reddit.com/*
 // @match        https://reddit.com/*
@@ -51,6 +51,7 @@
     commentLineHeight: 1.45,  // Zeilenabstand der Kommentare
     readMode: 'hide',         // gelesene Posts im Feed: off | dim | hide
     readOnScroll: true,       // Posts beim Vorbeiscrollen als gelesen markieren
+    readHideReddit: true,     // gelesene Posts zusätzlich über Reddits „Ausblenden“ verstecken (alle Geräte)
   };
 
   const BAR_COLORS = ['#8b5cf6', '#4f46e5', '#3b82f6', '#38bdf8', '#2dd4bf', '#4ade80', '#facc15', '#fb923c'];
@@ -117,6 +118,8 @@
     css += '[data-rmt-hide]{display:none !important;}';
     if (S.readMode === 'hide') css += '[data-rmt-read]{display:none !important;}';
     if (S.readMode === 'dim') css += '[data-rmt-read]{opacity:.4 !important;}';
+    // In diesem Durchgang vorbeigescrollt: abgeblendet (verschwindet beim nächsten Laden)
+    if (S.readMode !== 'off') css += '[data-rmt-seen]{opacity:.4 !important;transition:opacity .3s;}';
     if (S.hideBelowThread) {
       // Werbung im Post- und Kommentarbereich
       css += 'shreddit-ad-post, shreddit-comments-page-ad, shreddit-comment-tree-ad, [slot="ad-slot"], ' +
@@ -1607,8 +1610,70 @@
     if (!id || readSet.has(id)) return false;
     readSet.add(id);
     saveRead();
+    if (S.readHideReddit) queueRedditHide(id);
     return true;
   }
+
+  /* Reddits „Ausblenden“ – gesammelt senden ------------------------- */
+  let hideQueue = loadHideQueue();
+  let hideTimer = null, hideBusy = false;
+
+  function loadHideQueue() {
+    try {
+      const v = hasGM ? GM_getValue('hideQueue', []) : JSON.parse(localStorage.getItem('rmt-hidequeue') || '[]');
+      return Array.isArray(v) ? v : [];
+    } catch (e) { return []; }
+  }
+
+  function saveHideQueue() {
+    try {
+      if (hasGM) GM_setValue('hideQueue', hideQueue.slice(-500));
+      else localStorage.setItem('rmt-hidequeue', JSON.stringify(hideQueue.slice(-500)));
+    } catch (e) { /* ignorieren */ }
+  }
+
+  function queueRedditHide(id) {
+    if (!/^t3_[a-z0-9]+$/i.test(id) || hideQueue.includes(id)) return;
+    hideQueue.push(id);
+    saveHideQueue(); // auch nach Schließen der Seite nicht verloren
+    scheduleHideFlush(4000);
+  }
+
+  function scheduleHideFlush(ms) {
+    if (hideTimer || !hideQueue.length) return;
+    hideTimer = setTimeout(() => { hideTimer = null; flushRedditHide(); }, ms);
+  }
+
+  async function flushRedditHide(keepalive) {
+    if (hideBusy || !hideQueue.length || !S.readHideReddit) return;
+    hideBusy = true;
+    const batch = hideQueue.slice(0, 25);
+    try {
+      const uh = await getModhash();
+      const r = await fetch('/api/hide', {
+        method: 'POST',
+        credentials: 'include',
+        keepalive: !!keepalive,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Modhash': uh },
+        body: new URLSearchParams({ id: batch.join(','), uh }).toString(),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      hideQueue = hideQueue.filter((x) => !batch.includes(x));
+      saveHideQueue();
+      try { logNav(`Reddit: ${batch.length} Post(s) ausgeblendet`); } catch (e) { /* ignorieren */ }
+    } catch (e) {
+      try { logNav('Reddit-Ausblenden fehlgeschlagen: ' + e.message); } catch (e2) { /* ignorieren */ }
+      hideBusy = false;
+      setTimeout(() => scheduleHideFlush(0), 30000); // später erneut versuchen
+      return;
+    }
+    hideBusy = false;
+    if (hideQueue.length) scheduleHideFlush(3000);
+  }
+
+  // Beim Verlassen der Seite den Rest noch abschicken
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushRedditHide(true); });
+  setTimeout(() => scheduleHideFlush(5000), 0); // Reste aus früheren Besuchen
 
   function postIdOf(p) {
     const id = p.getAttribute('id') || p.getAttribute('post-id') || p.getAttribute('thingid') || '';
@@ -2234,6 +2299,8 @@
           <select id="readMode">${options([['off', 'Normal anzeigen'], ['dim', 'Abblenden'], ['hide', 'Ausblenden']], S.readMode)}</select>
         </label>
         <label class="chk"><input type="checkbox" id="readOnScroll"${checked(S.readOnScroll)}> Beim Vorbeiscrollen als gelesen markieren</label>
+        <label class="chk"><input type="checkbox" id="readHideReddit"${checked(S.readHideReddit)}> Gelesene Posts auch bei Reddit ausblenden (wirkt auf allen Geräten)</label>
+        <div class="hint">Nutzt Reddits eigene Funktion „Ausblenden“. Die Posts erscheinen dann unter Profil → Ausgeblendet und lassen sich dort wieder einblenden. Gesendet wird gesammelt, höchstens alle paar Sekunden.</div>
         <div class="hint">Als gelesen gilt ein Post, den du geöffnet hast – mit der Option oben auch einer, an dem du im Feed vorbeigescrollt bist. Ausgeblendet werden gelesene Posts beim nächsten Laden des Feeds, nicht während du scrollst (sonst springt die Seite). Gespeichert werden die letzten 5000 Posts, nur auf diesem Gerät.</div>
         <button type="button" class="txt" data-act="readreset">Gelesene Posts zurücksetzen</button>
 
@@ -2341,6 +2408,7 @@
         commentLineHeight: (() => { const v = parseFloat(String($('commentLineHeight').value).replace(',', '.')); return isNaN(v) ? DEFAULTS.commentLineHeight : Math.min(2.2, Math.max(1, v)); })(),
         readMode: $('readMode').value,
         readOnScroll: $('readOnScroll').checked,
+        readHideReddit: $('readHideReddit').checked,
         toolbarOpacity: (() => { const v = parseInt($('toolbarOpacity').value, 10); return isNaN(v) ? DEFAULTS.toolbarOpacity : Math.min(100, Math.max(0, v)); })(),
         toolbarBlur: (() => { const v = parseInt($('toolbarBlur').value, 10); return isNaN(v) ? DEFAULTS.toolbarBlur : Math.min(60, Math.max(0, v)); })(),
         commentGap: (() => { const v = parseInt($('commentGap').value, 10); return isNaN(v) ? DEFAULTS.commentGap : Math.min(40, Math.max(0, v)); })(),
