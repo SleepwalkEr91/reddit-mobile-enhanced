@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Mobile Enhanced
 // @namespace    reddit-mobile-enhanced
-// @version      1.0.1
+// @version      1.0.2
 // @description  Narwhal-ähnliches Reddit im mobilen Browser: eigene Kommentaransicht (komplett ausgeklappt, farbige Ebenen, Abstimmen, Antworten, Suche), Toolbar, Gesten, OLED-Schwarz, ohne Werbung
 // @match        https://www.reddit.com/*
 // @match        https://reddit.com/*
@@ -1469,6 +1469,47 @@
   }
 
   /* ---------------------------------------------------------------
+   * „Vorgeschlagene Videos“ nach dem Abspielen ausblenden
+   * ------------------------------------------------------------- */
+  // Reddits Videoplayer zeigt am Ende Vorschläge an. Der Player steckt in Shadow-DOM,
+  // darum wird gezielt in den (offenen) Shadow-Roots der Player gesucht.
+  const SUGGEST_RE = /^(Vorgeschlagene Videos|Empfohlene Videos|Weitere Videos|Suggested videos|Recommended videos|More videos|Up next|Als Nächstes)$/i;
+
+  function deepWalk(rootNode, fn, depth = 0) {
+    if (!rootNode || depth > 6) return;
+    const w = document.createTreeWalker(rootNode, NodeFilter.SHOW_ELEMENT);
+    let n = 0;
+    while (w.nextNode() && n++ < 3000) {
+      const el = w.currentNode;
+      fn(el);
+      if (el.shadowRoot) deepWalk(el.shadowRoot, fn, depth + 1);
+    }
+  }
+
+  function upTo(el) { return el.parentElement || (el.parentNode && el.parentNode.host) || null; }
+
+  function hideVideoSuggestions() {
+    if (!S.hideBelowThread || document.hidden) return;
+    const players = document.querySelectorAll('shreddit-player, shreddit-player-2, shreddit-player-3, [class*="player" i][src*="v.redd.it"]');
+    players.forEach((player) => {
+      const pr = player.getBoundingClientRect();
+      if (!pr.width || !pr.height) return;
+      deepWalk(player.shadowRoot || player, (el) => {
+        if (el.children.length > 1) return;
+        const txt = (el.textContent || '').trim();
+        if (txt.length > 30 || !SUGGEST_RE.test(txt)) return;
+        // zur Ebene hochgehen, die (fast) den ganzen Player bedeckt = Vorschlags-Overlay
+        let cur = el, overlay = null;
+        for (let i = 0; cur && cur !== player && i < 15; i++, cur = upTo(cur)) {
+          const r = cur.getBoundingClientRect();
+          if (r.width >= pr.width * 0.8 && r.height >= pr.height * 0.6) { overlay = cur; break; }
+        }
+        if (overlay && overlay.style.display !== 'none') overlay.style.setProperty('display', 'none', 'important');
+      });
+    });
+  }
+
+  /* ---------------------------------------------------------------
    * Weitere Beiträge und Werbung unter dem Thread ausblenden
    * ------------------------------------------------------------- */
   // Alles, was im Seiteninhalt nach dem Kommentarbereich kommt und Beiträge
@@ -1618,6 +1659,11 @@
     const hd = findHeader();
     out.push('--- Kopfleiste ---');
     out.push(hd ? `<${hd.tagName.toLowerCase()} class="${(hd.className && hd.className.baseVal === undefined ? hd.className : '').toString().slice(0, 80)}"> bg=${getComputedStyle(hd).backgroundColor} schwarz=${hd.hasAttribute('data-rmt-black')}` : 'nicht gefunden (evtl. gerade ausgeblendet – oben auf der Seite erneut versuchen)');
+
+    // Videoplayer
+    const pls = Array.from(document.querySelectorAll('shreddit-player, shreddit-player-2, shreddit-player-3'));
+    out.push(`--- Videoplayer: ${pls.length} ---`);
+    pls.slice(0, 2).forEach((pl) => out.push(`<${pl.tagName.toLowerCase()}> shadow=${pl.shadowRoot ? 'offen' : 'keiner/geschlossen'}`));
 
     // Galerien
     const cars = Array.from(document.querySelectorAll('*')).filter((el) => /CAROUSEL/i.test(el.tagName));
@@ -2146,6 +2192,7 @@
     new MutationObserver(scheduleCommentWork).observe(document.body, { childList: true, subtree: true });
     window.addEventListener('scroll', scheduleCommentWork, { passive: true });
     setInterval(() => { if (!document.hidden) updateCovered(); }, 600);
+    setInterval(hideVideoSuggestions, 700);
     // Kopfleiste in den ersten Sekunden schnell schwarz färben (nicht erst bei der nächsten DOM-Änderung)
     const fastHeader = () => {
       let n = 0;
