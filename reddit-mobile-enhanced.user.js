@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Mobile Enhanced
 // @namespace    reddit-mobile-enhanced
-// @version      1.1.0
+// @version      1.1.2
 // @description  Narwhal-ähnliches Reddit im mobilen Browser: eigene Kommentaransicht (komplett ausgeklappt, farbige Ebenen, Abstimmen, Antworten, Suche), Toolbar, Gesten, OLED-Schwarz, ohne Werbung
 // @match        https://www.reddit.com/*
 // @match        https://reddit.com/*
@@ -172,6 +172,13 @@
   function applySortRedirect() {
     const t = sortTarget();
     if (t && t !== location.href) {
+      // Schutz vor Umleitungsschleifen: dasselbe Ziel höchstens einmal in 10 s
+      try {
+        const last = JSON.parse(sessionStorage.getItem('rmt-redirect') || '{}');
+        if (last.t === t && Date.now() - last.at < 10000) return false;
+        sessionStorage.setItem('rmt-redirect', JSON.stringify({ t, at: Date.now() }));
+      } catch (e) { /* ignorieren */ }
+      try { logNav('Skript: Sortier-Umleitung → ' + new URL(t).pathname); } catch (e) { /* beim Start noch nicht verfügbar */ }
       location.replace(t);
       return true;
     }
@@ -185,10 +192,12 @@
    * ------------------------------------------------------------- */
   let lastUrl = location.href;
 
-  function onUrlChange() {
+  // allowRedirect: nur bei echter Navigation (pushState/Zurück). Bei replaceState passt Reddit die
+  // Adresse oft nur still an – ein Umleiten würde dann den ganzen Feed neu laden.
+  function onUrlChange(allowRedirect) {
     if (location.href === lastUrl) return;
     lastUrl = location.href;
-    if (applySortRedirect()) return;
+    if (allowRedirect && applySortRedirect()) return;
     renderBar();
     if (typeof headerFoundOnce !== 'undefined') headerFoundOnce = false; // neue Seite: Kopfleiste erneut schnell suchen
     scheduleCommentWork();
@@ -199,14 +208,14 @@
       const orig = history[fn];
       history[fn] = function () {
         const r = orig.apply(this, arguments);
-        setTimeout(onUrlChange, 0);
+        setTimeout(() => onUrlChange(fn === 'pushState'), 0);
         return r;
       };
     } catch (e) { /* Fallback: Intervall unten */ }
   });
   window.addEventListener('popstate', () => {
     if (typeof logNav === 'function') logNav('popstate → ' + location.pathname.slice(0, 50));
-    setTimeout(onUrlChange, 0);
+    setTimeout(() => onUrlChange(true), 0);
   });
   window.addEventListener('pageshow', (e) => { if (e.persisted && typeof logNav === 'function') logNav('pageshow (aus Cache) → ' + location.pathname.slice(0, 50)); });
 
@@ -1613,39 +1622,48 @@
     return m ? 't3_' + m[1] : '';
   }
 
+  // Wichtig: Während des Scrollens wird nichts ausgeblendet. Verschwinden Posts oberhalb des
+  // Bildschirms, springt der Inhalt (iOS ignoriert Korrekturen beim Schwung-Scrollen), und der
+  // schrumpfende Feed lässt Reddit ständig nachladen bzw. löst Orions „Ziehen zum Aktualisieren“ aus.
+  // Darum gilt: Ausgeblendet werden nur Posts, die schon VOR dem Öffnen dieses Feeds gelesen waren
+  // – und auch nur, wenn sie noch nicht über dem Bildschirmrand liegen.
+  let readSnapshot = new Set(readSet);
+  let snapshotFeed = location.pathname;
   let readAt = 0;
+
+  function refreshReadSnapshot() {
+    // Neuer Feed (anderer Pfad) → Stand neu übernehmen; Rückkehr aus einem Post in denselben Feed → nicht
+    if (isCommentPage() || location.pathname === snapshotFeed) return;
+    snapshotFeed = location.pathname;
+    readSnapshot = new Set(readSet);
+  }
+
   function markReadPosts() {
     if (S.readMode === 'off' && !S.readOnScroll) return;
     // Geöffneter Post zählt als gelesen
     if (isCommentPage()) { addRead(currentPostId()); return; }
+    refreshReadSnapshot();
     const now = Date.now();
     if (now - readAt < 250) return;
     readAt = now;
-    let shift = 0;
     document.querySelectorAll('shreddit-post').forEach((p) => {
       const id = postIdOf(p);
       if (!id) return;
       const box = p.closest('article') || p;
-      if (box.hasAttribute('data-rmt-read')) return;
-      if (readSet.has(id)) {
-        // schon früher gelesen: sofort markieren (beim Laden des Feeds, noch nicht gesehen)
-        const r = box.getBoundingClientRect();
-        if (S.readMode === 'hide' && r.bottom < 0) shift += r.height; // liegt über dem Bildschirm → Sprung ausgleichen
-        box.setAttribute('data-rmt-read', '');
+      if (box.hasAttribute('data-rmt-read') || box.hasAttribute('data-rmt-seen')) return;
+      const r = box.getBoundingClientRect();
+      if (readSnapshot.has(id)) {
+        // früher gelesen: ausblenden/abblenden, aber nur wenn er nicht schon oben aus dem Bild ist
+        if (r.bottom >= 0) box.setAttribute('data-rmt-read', '');
+        else box.setAttribute('data-rmt-seen', '');
         return;
       }
-      if (S.readOnScroll) {
-        const r = box.getBoundingClientRect();
-        if (r.height && r.bottom < 0) {
-          // komplett nach oben aus dem Bild gescrollt → gelesen
-          addRead(id);
-          if (S.readMode === 'hide') shift += r.height;
-          box.setAttribute('data-rmt-read', '');
-        }
+      // in diesem Durchgang vorbeigescrollt: nur merken, sichtbar lassen (liegt ja ohnehin oben außer Sicht)
+      if (S.readOnScroll && r.height && r.bottom < 0) {
+        addRead(id);
+        box.setAttribute('data-rmt-seen', '');
       }
     });
-    // Ausgeblendete Posts oberhalb würden den Inhalt nach oben springen lassen – ausgleichen
-    if (shift > 0) window.scrollBy(0, -shift);
   }
   window.addEventListener('scroll', () => { if (S.readOnScroll && !isCommentPage()) markReadPosts(); }, { passive: true });
 
@@ -2216,7 +2234,7 @@
           <select id="readMode">${options([['off', 'Normal anzeigen'], ['dim', 'Abblenden'], ['hide', 'Ausblenden']], S.readMode)}</select>
         </label>
         <label class="chk"><input type="checkbox" id="readOnScroll"${checked(S.readOnScroll)}> Beim Vorbeiscrollen als gelesen markieren</label>
-        <div class="hint">Als gelesen gilt ein Post, den du geöffnet hast – mit der Option oben auch einer, an dem du im Feed vorbeigescrollt bist. Gespeichert werden die letzten 5000 Posts, nur auf diesem Gerät.</div>
+        <div class="hint">Als gelesen gilt ein Post, den du geöffnet hast – mit der Option oben auch einer, an dem du im Feed vorbeigescrollt bist. Ausgeblendet werden gelesene Posts beim nächsten Laden des Feeds, nicht während du scrollst (sonst springt die Seite). Gespeichert werden die letzten 5000 Posts, nur auf diesem Gerät.</div>
         <button type="button" class="txt" data-act="readreset">Gelesene Posts zurücksetzen</button>
 
         <h3>Darstellung</h3>
@@ -2273,6 +2291,8 @@
     modal.querySelector('[data-act=readreset]').addEventListener('click', () => {
       readSet = new Set();
       saveRead(true);
+      readSnapshot = new Set();
+      document.querySelectorAll('[data-rmt-seen]').forEach((el) => el.removeAttribute('data-rmt-seen'));
       document.querySelectorAll('[data-rmt-read]').forEach((el) => el.removeAttribute('data-rmt-read'));
       toast('Gelesene Posts zurückgesetzt');
     });
@@ -2375,7 +2395,7 @@
     setInterval(() => {
       buildUI();       // Toolbar wieder einhängen, falls Reddit den Body neu aufbaut
       applyDocStyle(); // Stylesheet wieder einhängen, falls entfernt
-      onUrlChange();   // Fallback für URL-Wechsel
+      onUrlChange(false); // Fallback für URL-Wechsel (ohne Umleiten)
     }, 1000);
   }
 
