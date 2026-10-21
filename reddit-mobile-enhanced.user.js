@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Mobile Enhanced
 // @namespace    reddit-mobile-enhanced
-// @version      1.0.0
+// @version      1.0.1
 // @description  Narwhal-ähnliches Reddit im mobilen Browser: eigene Kommentaransicht (komplett ausgeklappt, farbige Ebenen, Abstimmen, Antworten, Suche), Toolbar, Gesten, OLED-Schwarz, ohne Werbung
 // @match        https://www.reddit.com/*
 // @match        https://reddit.com/*
@@ -112,6 +112,7 @@
     if (S.hideBelowThread) {
       // Werbung im Post- und Kommentarbereich
       css += 'shreddit-ad-post, shreddit-comments-page-ad, shreddit-comment-tree-ad, [slot="ad-slot"], ' +
+        'shreddit-dynamic-ad-link, shreddit-sidebar-ad, faceplate-partial[src*="/ad"], [data-testid*="ad-" i], ' +
         'pdp-related-posts, shreddit-related-posts, related-community-posts, [id^="related-"], ' +
         '#comments-page-ad-container{display:none !important;}';
     }
@@ -1429,6 +1430,45 @@
 
 
   /* ---------------------------------------------------------------
+   * Leere Hüllen ausgeblendeter Werbung im Feed entfernen
+   * ------------------------------------------------------------- */
+  // Reddit packt Anzeigen in eigene Container mit Hintergrund und Mindesthöhe.
+  // Wird nur die Anzeige ausgeblendet, bleibt eine graue Lücke zwischen den Posts.
+  const AD_SEL = 'shreddit-ad-post, shreddit-dynamic-ad-link, [slot="ad-slot"], faceplate-partial[src*="/ad"]';
+  let adAt = 0;
+
+  function collapseAdGaps() {
+    if (!S.hideBelowThread || !document.body) return;
+    const now = Date.now();
+    if (now - adAt < 800) return;
+    adAt = now;
+    document.querySelectorAll(AD_SEL).forEach((ad) => {
+      let el = ad;
+      // hochgehen, solange der Container sonst nichts Sichtbares enthält
+      for (let i = 0; i < 6 && el.parentElement; i++) {
+        const p = el.parentElement;
+        if (/^(SHREDDIT-FEED|MAIN|BODY)$/.test(p.tagName) || p.id === 'main-content') break;
+        const others = Array.from(p.children).filter((c) => c !== el && c.tagName !== 'SCRIPT' && c.tagName !== 'STYLE' &&
+          !c.hasAttribute('data-rmt-hide') && c.getClientRects().length && (c.textContent || '').trim());
+        if (others.length || p.querySelector('shreddit-post')) break;
+        el = p;
+      }
+      if (el !== ad && !el.hasAttribute('data-rmt-hide')) el.setAttribute('data-rmt-hide', '');
+    });
+    // Leere Lücken direkt im Feed (Platzhalter ohne Inhalt zwischen Posts)
+    document.querySelectorAll('shreddit-feed > *:not(shreddit-post):not(article):not([data-rmt-hide])').forEach((el) => {
+      // Nachlade-Auslöser fürs endlose Scrollen nie anfassen
+      if (/^FACEPLATE-PARTIAL$|LOADER|LOADING/i.test(el.tagName) && !/\/ad/.test(el.getAttribute('src') || '')) return;
+      if (el.querySelector('shreddit-post, article, faceplate-partial, faceplate-loader, shreddit-loading')) return;
+      const r = el.getBoundingClientRect();
+      const bg = getComputedStyle(el).backgroundColor;
+      const filled = bg && !/rgba\(0,\s*0,\s*0,\s*0\)|transparent/.test(bg);
+      // nur sichtbare, leere „Kästen“ (eigener Hintergrund, kein Text, keine Medien)
+      if (filled && r.height > 30 && !(el.textContent || '').trim() && !el.querySelector('img, video')) el.setAttribute('data-rmt-hide', '');
+    });
+  }
+
+  /* ---------------------------------------------------------------
    * Weitere Beiträge und Werbung unter dem Thread ausblenden
    * ------------------------------------------------------------- */
   // Alles, was im Seiteninhalt nach dem Kommentarbereich kommt und Beiträge
@@ -1469,6 +1509,7 @@
       ensureCustomView();
       hideBelowThread();
       hideAppBanner();
+      collapseAdGaps();
       blackenHeader();
       composerUpdate();
     }, 300);
@@ -1965,7 +2006,7 @@
         <div class="hint">Gilt für beide Ansichten.</div>
 
         <h3>Eigene Kommentaransicht</h3>
-        <label class="chk"><input type="checkbox" id="hideBelowThread"${checked(S.hideBelowThread)}> Weitere Beiträge und Werbung unter dem Thread ausblenden</label>
+        <label class="chk"><input type="checkbox" id="hideBelowThread"${checked(S.hideBelowThread)}> Werbung (auch im Feed) und weitere Beiträge unter dem Thread ausblenden</label>
         <label class="chk"><input type="checkbox" id="customComments"${checked(S.customComments)}> Eigene Ansicht verwenden</label>
         <div class="hint">Ersetzt Reddits Kommentarbereich: alles ausgeklappt, farbige Balken, Abstimmen und Antworten. Ausgeschaltet zeigt Reddit seinen normalen, unveränderten Kommentarbereich.</div>
         <label class="chk"><input type="checkbox" id="autoMore"${checked(S.autoMore)}> „Weitere Antworten“ automatisch laden</label>
