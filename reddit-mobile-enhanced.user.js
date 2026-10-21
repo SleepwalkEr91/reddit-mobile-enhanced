@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Mobile Enhanced
 // @namespace    reddit-mobile-enhanced
-// @version      1.0.3
+// @version      1.1.0
 // @description  Narwhal-ähnliches Reddit im mobilen Browser: eigene Kommentaransicht (komplett ausgeklappt, farbige Ebenen, Abstimmen, Antworten, Suche), Toolbar, Gesten, OLED-Schwarz, ohne Werbung
 // @match        https://www.reddit.com/*
 // @match        https://reddit.com/*
@@ -46,6 +46,11 @@
     trueBlack: true,          // dunkles Design mit reinem Schwarz (OLED)
     hideAppBanner: true,      // Banner „In der Reddit-App anzeigen“ ausblenden
     loopVideos: true,         // Videos in Schleife abspielen (verhindert Reddits Vorschläge am Ende)
+    collapseMod: true,        // AutoModerator und angepinnte Mod-Kommentare eingeklappt anzeigen
+    commentFontSize: 15,      // Schriftgröße der Kommentare in px
+    commentLineHeight: 1.45,  // Zeilenabstand der Kommentare
+    readMode: 'hide',         // gelesene Posts im Feed: off | dim | hide
+    readOnScroll: true,       // Posts beim Vorbeiscrollen als gelesen markieren
   };
 
   const BAR_COLORS = ['#8b5cf6', '#4f46e5', '#3b82f6', '#38bdf8', '#2dd4bf', '#4ade80', '#facc15', '#fb923c'];
@@ -110,6 +115,8 @@
       css += 'html, body{overscroll-behavior-x:none !important;}';
     }
     css += '[data-rmt-hide]{display:none !important;}';
+    if (S.readMode === 'hide') css += '[data-rmt-read]{display:none !important;}';
+    if (S.readMode === 'dim') css += '[data-rmt-read]{opacity:.4 !important;}';
     if (S.hideBelowThread) {
       // Werbung im Post- und Kommentarbereich
       css += 'shreddit-ad-post, shreddit-comments-page-ad, shreddit-comment-tree-ad, [slot="ad-slot"], ' +
@@ -503,7 +510,7 @@
     .c.up > .self .vt.u, .c.up > .self .sc { color: #ff4500; }
     .c.dn > .self .vt.d, .c.dn > .self .sc { color: #7193ff; }
     .cc { font-size: 12px; color: var(--muted); }
-    .body { font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
+    .body { font-size: var(--fs, 15px); line-height: var(--lh, 1.45); overflow-wrap: anywhere; }
     .body p { margin: 4px 0; }
     .body a { color: var(--link); }
     .body blockquote { margin: 4px 0; padding-left: 8px; border-left: 2px solid var(--muted); color: var(--muted); }
@@ -703,7 +710,17 @@
     const kids = el.querySelector('.kids');
     const rep = d.replies && d.replies.data && d.replies.data.children;
     if (rep) rep.forEach((ch) => { const k = renderThing(ch, state); if (k) kids.appendChild(k); });
+    // AutoModerator und angepinnte Mod-Kommentare eingeklappt anzeigen
+    if (S.collapseMod && depth === 0 && (d.author === 'AutoModerator' || (d.stickied && d.distinguished === 'moderator'))) {
+      cvToggleCollapse(el);
+    }
     return el;
+  }
+
+  function cvApplyLook(h) {
+    h.style.setProperty('--gap', (Number(S.commentGap) || 0) + 'px');
+    h.style.setProperty('--fs', (Number(S.commentFontSize) || 15) + 'px');
+    h.style.setProperty('--lh', String(Number(S.commentLineHeight) || 1.45));
   }
 
   function renderMore(d, state) {
@@ -838,7 +855,8 @@
   function cvToggleCollapse(c) {
     const col = c.classList.toggle('col');
     const cc = c.querySelector(':scope > .self .cc');
-    if (cc) cc.textContent = col ? `+${c.querySelectorAll('.c').length}` : '';
+    const n = c.querySelectorAll('.c').length;
+    if (cc) cc.textContent = col ? (n ? `+${n}` : '▸') : '';
   }
 
   function cvOnClick(e) {
@@ -1011,7 +1029,7 @@
   function cvMount() {
     const host = document.createElement('div');
     host.id = 'rmt-cv';
-    host.style.setProperty('--gap', (Number(S.commentGap) || 0) + 'px');
+    cvApplyLook(host);
     const root = host.attachShadow({ mode: 'open' });
     root.innerHTML =
       `<style>${CV_CSS}</style><div class="wrap"><div class="top"><span class="title">Kommentare</span>` +
@@ -1546,6 +1564,92 @@
 
 
   /* ---------------------------------------------------------------
+   * Gelesene Posts (abblenden / ausblenden)
+   * ------------------------------------------------------------- */
+  const READ_MAX = 5000;
+  let readSet = loadRead();
+  let readDirty = false, readSaveTimer = null;
+
+  function loadRead() {
+    try {
+      const v = hasGM ? GM_getValue('readPosts', []) : JSON.parse(localStorage.getItem('rmt-read') || '[]');
+      return new Set(Array.isArray(v) ? v : []);
+    } catch (e) { return new Set(); }
+  }
+
+  function saveRead(now) {
+    readDirty = true;
+    const run = () => {
+      readSaveTimer = null;
+      if (!readDirty) return;
+      readDirty = false;
+      let arr = Array.from(readSet);
+      if (arr.length > READ_MAX) { arr = arr.slice(-READ_MAX); readSet = new Set(arr); }
+      try {
+        if (hasGM) GM_setValue('readPosts', arr);
+        else localStorage.setItem('rmt-read', JSON.stringify(arr));
+      } catch (e) { /* ignorieren */ }
+    };
+    if (now) { clearTimeout(readSaveTimer); run(); return; }
+    if (!readSaveTimer) readSaveTimer = setTimeout(run, 1500);
+  }
+
+  function addRead(id) {
+    if (!id || readSet.has(id)) return false;
+    readSet.add(id);
+    saveRead();
+    return true;
+  }
+
+  function postIdOf(p) {
+    const id = p.getAttribute('id') || p.getAttribute('post-id') || p.getAttribute('thingid') || '';
+    if (/^t3_/.test(id)) return id;
+    const m = (p.getAttribute('permalink') || '').match(/\/comments\/([a-z0-9]+)/i);
+    return m ? 't3_' + m[1] : '';
+  }
+
+  function currentPostId() {
+    const m = location.pathname.match(/\/comments\/([a-z0-9]+)/i);
+    return m ? 't3_' + m[1] : '';
+  }
+
+  let readAt = 0;
+  function markReadPosts() {
+    if (S.readMode === 'off' && !S.readOnScroll) return;
+    // Geöffneter Post zählt als gelesen
+    if (isCommentPage()) { addRead(currentPostId()); return; }
+    const now = Date.now();
+    if (now - readAt < 250) return;
+    readAt = now;
+    let shift = 0;
+    document.querySelectorAll('shreddit-post').forEach((p) => {
+      const id = postIdOf(p);
+      if (!id) return;
+      const box = p.closest('article') || p;
+      if (box.hasAttribute('data-rmt-read')) return;
+      if (readSet.has(id)) {
+        // schon früher gelesen: sofort markieren (beim Laden des Feeds, noch nicht gesehen)
+        const r = box.getBoundingClientRect();
+        if (S.readMode === 'hide' && r.bottom < 0) shift += r.height; // liegt über dem Bildschirm → Sprung ausgleichen
+        box.setAttribute('data-rmt-read', '');
+        return;
+      }
+      if (S.readOnScroll) {
+        const r = box.getBoundingClientRect();
+        if (r.height && r.bottom < 0) {
+          // komplett nach oben aus dem Bild gescrollt → gelesen
+          addRead(id);
+          if (S.readMode === 'hide') shift += r.height;
+          box.setAttribute('data-rmt-read', '');
+        }
+      }
+    });
+    // Ausgeblendete Posts oberhalb würden den Inhalt nach oben springen lassen – ausgleichen
+    if (shift > 0) window.scrollBy(0, -shift);
+  }
+  window.addEventListener('scroll', () => { if (S.readOnScroll && !isCommentPage()) markReadPosts(); }, { passive: true });
+
+  /* ---------------------------------------------------------------
    * Weitere Beiträge und Werbung unter dem Thread ausblenden
    * ------------------------------------------------------------- */
   // Alles, was im Seiteninhalt nach dem Kommentarbereich kommt und Beiträge
@@ -1587,6 +1691,7 @@
       hideBelowThread();
       hideAppBanner();
       collapseAdGaps();
+      markReadPosts();
       blackenHeader();
       composerUpdate();
     }, 300);
@@ -2094,10 +2199,25 @@
         <div class="hint">Ersetzt Reddits Kommentarbereich: alles ausgeklappt, farbige Balken, Abstimmen und Antworten. Ausgeschaltet zeigt Reddit seinen normalen, unveränderten Kommentarbereich.</div>
         <label class="chk"><input type="checkbox" id="autoMore"${checked(S.autoMore)}> „Weitere Antworten“ automatisch laden</label>
         <label class="chk"><input type="checkbox" id="floatingComposer"${checked(S.floatingComposer)}> Schwebendes Kommentarfeld unten</label>
+        <label class="chk"><input type="checkbox" id="collapseMod"${checked(S.collapseMod)}> AutoModerator und angepinnte Mod-Kommentare einklappen</label>
+        <label>Schriftgröße der Kommentare (px)
+          <input type="number" id="commentFontSize" inputmode="numeric" min="11" max="24" value="${esc(S.commentFontSize)}">
+        </label>
+        <label>Zeilenabstand der Kommentare (z. B. 1.45)
+          <input type="number" id="commentLineHeight" inputmode="decimal" step="0.05" min="1" max="2.2" value="${esc(S.commentLineHeight)}">
+        </label>
         <label>Abstand zwischen Kommentaren (px)
           <input type="number" id="commentGap" inputmode="numeric" min="0" max="40" value="${esc(S.commentGap)}">
         </label>
         <label class="chk"><input type="checkbox" id="showAvatars"${checked(S.showAvatars)}> Profilbilder anzeigen</label>
+
+        <h3>Gelesene Posts</h3>
+        <label>Gelesene Posts im Feed
+          <select id="readMode">${options([['off', 'Normal anzeigen'], ['dim', 'Abblenden'], ['hide', 'Ausblenden']], S.readMode)}</select>
+        </label>
+        <label class="chk"><input type="checkbox" id="readOnScroll"${checked(S.readOnScroll)}> Beim Vorbeiscrollen als gelesen markieren</label>
+        <div class="hint">Als gelesen gilt ein Post, den du geöffnet hast – mit der Option oben auch einer, an dem du im Feed vorbeigescrollt bist. Gespeichert werden die letzten 5000 Posts, nur auf diesem Gerät.</div>
+        <button type="button" class="txt" data-act="readreset">Gelesene Posts zurücksetzen</button>
 
         <h3>Darstellung</h3>
         <label class="chk"><input type="checkbox" id="trueBlack"${checked(S.trueBlack)}> Reines Schwarz im dunklen Design (OLED), inkl. Kopfleiste</label>
@@ -2150,6 +2270,12 @@
     modal.querySelector('[data-act=cancel]').addEventListener('click', closeSettings);
     modal.querySelector('[data-act=diag]').addEventListener('click', copyDiagnostics);
     modal.querySelector('[data-act=acct]').addEventListener('click', accountTest);
+    modal.querySelector('[data-act=readreset]').addEventListener('click', () => {
+      readSet = new Set();
+      saveRead(true);
+      document.querySelectorAll('[data-rmt-read]').forEach((el) => el.removeAttribute('data-rmt-read'));
+      toast('Gelesene Posts zurückgesetzt');
+    });
     modal.querySelector('[data-act=navlog]').addEventListener('click', () =>
       showText(navLog.length ? navLog.join('\n') : 'Noch keine Navigation aufgezeichnet', 'Navigationsprotokoll'));
     modal.querySelector('[data-act=reset]').addEventListener('click', () => {
@@ -2190,6 +2316,11 @@
         trueBlack: $('trueBlack').checked,
         hideAppBanner: $('hideAppBanner').checked,
         loopVideos: $('loopVideos').checked,
+        collapseMod: $('collapseMod').checked,
+        commentFontSize: (() => { const v = parseInt($('commentFontSize').value, 10); return isNaN(v) ? DEFAULTS.commentFontSize : Math.min(24, Math.max(11, v)); })(),
+        commentLineHeight: (() => { const v = parseFloat(String($('commentLineHeight').value).replace(',', '.')); return isNaN(v) ? DEFAULTS.commentLineHeight : Math.min(2.2, Math.max(1, v)); })(),
+        readMode: $('readMode').value,
+        readOnScroll: $('readOnScroll').checked,
         toolbarOpacity: (() => { const v = parseInt($('toolbarOpacity').value, 10); return isNaN(v) ? DEFAULTS.toolbarOpacity : Math.min(100, Math.max(0, v)); })(),
         toolbarBlur: (() => { const v = parseInt($('toolbarBlur').value, 10); return isNaN(v) ? DEFAULTS.toolbarBlur : Math.min(60, Math.max(0, v)); })(),
         commentGap: (() => { const v = parseInt($('commentGap').value, 10); return isNaN(v) ? DEFAULTS.commentGap : Math.min(40, Math.max(0, v)); })(),
@@ -2197,7 +2328,8 @@
       };
       const reloadView = cv && prev.showAvatars !== S.showAvatars;
       saveSettings(S);
-      if (cv) cv.host.style.setProperty('--gap', (Number(S.commentGap) || 0) + 'px');
+      if (cv) cvApplyLook(cv.host);
+      applyDocStyle();
       applyBarLook();
       if (reloadView) cvUnmount(); // neu aufbauen, wird unten wieder eingehängt
       closeSettings();
