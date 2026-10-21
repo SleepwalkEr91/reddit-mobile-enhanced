@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Mobile Enhanced
 // @namespace    reddit-mobile-enhanced
-// @version      1.0.2
+// @version      1.0.3
 // @description  Narwhal-ähnliches Reddit im mobilen Browser: eigene Kommentaransicht (komplett ausgeklappt, farbige Ebenen, Abstimmen, Antworten, Suche), Toolbar, Gesten, OLED-Schwarz, ohne Werbung
 // @match        https://www.reddit.com/*
 // @match        https://reddit.com/*
@@ -45,6 +45,7 @@
     toolbarBlur: 16,          // Unschärfe hinter Toolbar und Kommentarfeld in px
     trueBlack: true,          // dunkles Design mit reinem Schwarz (OLED)
     hideAppBanner: true,      // Banner „In der Reddit-App anzeigen“ ausblenden
+    loopVideos: true,         // Videos in Schleife abspielen (verhindert Reddits Vorschläge am Ende)
   };
 
   const BAR_COLORS = ['#8b5cf6', '#4f46e5', '#3b82f6', '#38bdf8', '#2dd4bf', '#4ade80', '#facc15', '#fb923c'];
@@ -1489,25 +1490,60 @@
   function upTo(el) { return el.parentElement || (el.parentNode && el.parentNode.host) || null; }
 
   function hideVideoSuggestions() {
-    if (!S.hideBelowThread || document.hidden) return;
-    const players = document.querySelectorAll('shreddit-player, shreddit-player-2, shreddit-player-3, [class*="player" i][src*="v.redd.it"]');
+    if (document.hidden) return;
+    const players = document.querySelectorAll('shreddit-player, shreddit-player-2, shreddit-player-3');
     players.forEach((player) => {
       const pr = player.getBoundingClientRect();
       if (!pr.width || !pr.height) return;
-      deepWalk(player.shadowRoot || player, (el) => {
-        if (el.children.length > 1) return;
-        const txt = (el.textContent || '').trim();
-        if (txt.length > 30 || !SUGGEST_RE.test(txt)) return;
-        // zur Ebene hochgehen, die (fast) den ganzen Player bedeckt = Vorschlags-Overlay
+      const visit = (el) => {
+        // 1. Videos in Schleife: dann endet das Video nie und Reddit zeigt keine Vorschläge
+        if (S.loopVideos && el.tagName === 'VIDEO' && !el.loop) el.loop = true;
+        if (!S.hideBelowThread) return;
+        // 2. Falls doch ein Vorschlags-Overlay erscheint: ausblenden
+        if (el.children.length > 3) return;
+        const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (txt.length > 40 || !SUGGEST_RE.test(txt)) return;
         let cur = el, overlay = null;
-        for (let i = 0; cur && cur !== player && i < 15; i++, cur = upTo(cur)) {
+        for (let i = 0; cur && cur !== player && i < 20; i++, cur = upTo(cur)) {
           const r = cur.getBoundingClientRect();
-          if (r.width >= pr.width * 0.8 && r.height >= pr.height * 0.6) { overlay = cur; break; }
+          const big = r.width >= pr.width * 0.8 && r.height >= pr.height * 0.5;
+          const hasCards = cur.querySelector && cur.querySelector('a[href*="/comments/"], img, [role="link"]');
+          if (big || (hasCards && r.height >= pr.height * 0.3)) { overlay = cur; break; }
         }
         if (overlay && overlay.style.display !== 'none') overlay.style.setProperty('display', 'none', 'important');
-      });
+      };
+      // Shadow-DOM des Players und seinen normalen Inhalt durchsuchen
+      if (player.shadowRoot) deepWalk(player.shadowRoot, visit);
+      deepWalk(player, visit);
     });
   }
+
+  // Für die Diagnose: wo steckt der Vorschlags-Text?
+  function describeSuggestions() {
+    const out = [];
+    document.querySelectorAll('shreddit-player, shreddit-player-2, shreddit-player-3').forEach((player, k) => {
+      const vids = [];
+      const hits = [];
+      const visit = (el) => {
+        if (el.tagName === 'VIDEO') vids.push(`loop=${el.loop} ended=${el.ended}`);
+        if (el.children.length <= 3 && /vorgeschlagen|suggested|empfohlen|recommended/i.test(el.textContent || '') && (el.textContent || '').length < 60) {
+          const path = [];
+          for (let c = el, i = 0; c && c !== player && i < 12; i++, c = upTo(c)) {
+            const r = c.getBoundingClientRect();
+            path.push(`${c.tagName.toLowerCase()}${c.id ? '#' + c.id : ''}${c.className && typeof c.className === 'string' ? '.' + c.className.trim().split(/\s+/).slice(0, 2).join('.') : ''}[${Math.round(r.width)}x${Math.round(r.height)}]`);
+          }
+          hits.push(path.join(' < '));
+        }
+      };
+      if (player.shadowRoot) deepWalk(player.shadowRoot, visit);
+      deepWalk(player, visit);
+      const pr = player.getBoundingClientRect();
+      out.push(`Player ${k + 1} [${Math.round(pr.width)}x${Math.round(pr.height)}] videos: ${vids.join(' | ') || '-'}`);
+      hits.slice(0, 3).forEach((h) => out.push('  Treffer: ' + h));
+    });
+    return out;
+  }
+
 
   /* ---------------------------------------------------------------
    * Weitere Beiträge und Werbung unter dem Thread ausblenden
@@ -1664,6 +1700,7 @@
     const pls = Array.from(document.querySelectorAll('shreddit-player, shreddit-player-2, shreddit-player-3'));
     out.push(`--- Videoplayer: ${pls.length} ---`);
     pls.slice(0, 2).forEach((pl) => out.push(`<${pl.tagName.toLowerCase()}> shadow=${pl.shadowRoot ? 'offen' : 'keiner/geschlossen'}`));
+    describeSuggestions().forEach((l) => out.push(l));
 
     // Galerien
     const cars = Array.from(document.querySelectorAll('*')).filter((el) => /CAROUSEL/i.test(el.tagName));
@@ -2065,6 +2102,7 @@
         <h3>Darstellung</h3>
         <label class="chk"><input type="checkbox" id="trueBlack"${checked(S.trueBlack)}> Reines Schwarz im dunklen Design (OLED), inkl. Kopfleiste</label>
         <label class="chk"><input type="checkbox" id="hideAppBanner"${checked(S.hideAppBanner)}> Banner „In der Reddit-App anzeigen“ ausblenden</label>
+        <label class="chk"><input type="checkbox" id="loopVideos"${checked(S.loopVideos)}> Videos in Schleife abspielen (keine Vorschläge am Ende)</label>
         <label>Deckkraft von Toolbar und Kommentarfeld (%) – weniger = transparenter
           <input type="number" id="toolbarOpacity" inputmode="numeric" min="0" max="100" value="${esc(S.toolbarOpacity)}">
         </label>
@@ -2151,6 +2189,7 @@
         floatingComposer: $('floatingComposer').checked,
         trueBlack: $('trueBlack').checked,
         hideAppBanner: $('hideAppBanner').checked,
+        loopVideos: $('loopVideos').checked,
         toolbarOpacity: (() => { const v = parseInt($('toolbarOpacity').value, 10); return isNaN(v) ? DEFAULTS.toolbarOpacity : Math.min(100, Math.max(0, v)); })(),
         toolbarBlur: (() => { const v = parseInt($('toolbarBlur').value, 10); return isNaN(v) ? DEFAULTS.toolbarBlur : Math.min(60, Math.max(0, v)); })(),
         commentGap: (() => { const v = parseInt($('commentGap').value, 10); return isNaN(v) ? DEFAULTS.commentGap : Math.min(40, Math.max(0, v)); })(),
