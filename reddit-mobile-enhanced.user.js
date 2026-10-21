@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Mobile Enhanced
 // @namespace    reddit-mobile-enhanced
-// @version      1.2.0
+// @version      1.2.1
 // @description  Narwhal-ähnliches Reddit im mobilen Browser: eigene Kommentaransicht (komplett ausgeklappt, farbige Ebenen, Abstimmen, Antworten, Suche), Toolbar, Gesten, OLED-Schwarz, ohne Werbung
 // @match        https://www.reddit.com/*
 // @match        https://reddit.com/*
@@ -52,6 +52,7 @@
     readMode: 'hide',         // gelesene Posts im Feed: off | dim | hide
     readOnScroll: true,       // Posts beim Vorbeiscrollen als gelesen markieren
     readHideReddit: true,     // gelesene Posts zusätzlich über Reddits „Ausblenden“ verstecken (alle Geräte)
+    readScope: 'home',        // wo „gelesen“ greift: home = nur Startseite, subs = Startseite + Subreddits
   };
 
   const BAR_COLORS = ['#8b5cf6', '#4f46e5', '#3b82f6', '#38bdf8', '#2dd4bf', '#4ade80', '#facc15', '#fb923c'];
@@ -197,8 +198,10 @@
 
   // allowRedirect: nur bei echter Navigation (pushState/Zurück). Bei replaceState passt Reddit die
   // Adresse oft nur still an – ein Umleiten würde dann den ganzen Feed neu laden.
+  let prevUrl = document.referrer || '';
   function onUrlChange(allowRedirect) {
     if (location.href === lastUrl) return;
+    prevUrl = lastUrl;
     lastUrl = location.href;
     if (allowRedirect && applySortRedirect()) return;
     renderBar();
@@ -1703,10 +1706,22 @@
     readSnapshot = new Set(readSet);
   }
 
+  // Wo greift „gelesen“? Nur im Hauptfeed (optional auch in Subreddits) – nie im Profil
+  // (Gespeichert, Verlauf, Ausgeblendet, Upvotes …), sonst würde z. B. ein gespeicherter Post ausgeblendet.
+  function isHomeFeed(path) { return /^\/((best|hot|new|top|rising)\/?)?$/.test(path); }
+  function isSubFeed(path) { return /^\/r\/[^/]+\/?((best|hot|new|top|rising)\/?)?$/.test(path); }
+  function readFeedActive(path) {
+    return isHomeFeed(path) || (S.readScope === 'subs' && isSubFeed(path));
+  }
+  function cameFromProfile() {
+    try { return /^\/(user|u)\//.test(new URL(prevUrl, location.origin).pathname); } catch (e) { return false; }
+  }
+
   function markReadPosts() {
     if (S.readMode === 'off' && !S.readOnScroll) return;
-    // Geöffneter Post zählt als gelesen
-    if (isCommentPage()) { addRead(currentPostId()); return; }
+    // Geöffneter Post zählt als gelesen – außer er wurde aus dem Profil heraus geöffnet
+    if (isCommentPage()) { if (!cameFromProfile()) addRead(currentPostId()); return; }
+    if (!readFeedActive(location.pathname)) return;
     refreshReadSnapshot();
     const now = Date.now();
     if (now - readAt < 250) return;
@@ -1730,7 +1745,7 @@
       }
     });
   }
-  window.addEventListener('scroll', () => { if (S.readOnScroll && !isCommentPage()) markReadPosts(); }, { passive: true });
+  window.addEventListener('scroll', () => { if (S.readOnScroll && !isCommentPage() && readFeedActive(location.pathname)) markReadPosts(); }, { passive: true });
 
   /* ---------------------------------------------------------------
    * Weitere Beiträge und Werbung unter dem Thread ausblenden
@@ -2298,10 +2313,13 @@
         <label>Gelesene Posts im Feed
           <select id="readMode">${options([['off', 'Normal anzeigen'], ['dim', 'Abblenden'], ['hide', 'Ausblenden']], S.readMode)}</select>
         </label>
+        <label>Gilt für
+          <select id="readScope">${options([['home', 'Nur Startseite'], ['subs', 'Startseite und Subreddits']], S.readScope)}</select>
+        </label>
         <label class="chk"><input type="checkbox" id="readOnScroll"${checked(S.readOnScroll)}> Beim Vorbeiscrollen als gelesen markieren</label>
         <label class="chk"><input type="checkbox" id="readHideReddit"${checked(S.readHideReddit)}> Gelesene Posts auch bei Reddit ausblenden (wirkt auf allen Geräten)</label>
         <div class="hint">Nutzt Reddits eigene Funktion „Ausblenden“. Die Posts erscheinen dann unter Profil → Ausgeblendet und lassen sich dort wieder einblenden. Gesendet wird gesammelt, höchstens alle paar Sekunden.</div>
-        <div class="hint">Als gelesen gilt ein Post, den du geöffnet hast – mit der Option oben auch einer, an dem du im Feed vorbeigescrollt bist. Ausgeblendet werden gelesene Posts beim nächsten Laden des Feeds, nicht während du scrollst (sonst springt die Seite). Gespeichert werden die letzten 5000 Posts, nur auf diesem Gerät.</div>
+        <div class="hint">Im Profil (Gespeichert, Verlauf, Ausgeblendet, Upvotes …) greift das nie. Als gelesen gilt ein Post, den du geöffnet hast (außer aus dem Profil heraus) – mit der Option oben auch einer, an dem du im Feed vorbeigescrollt bist. Ausgeblendet werden gelesene Posts beim nächsten Laden des Feeds, nicht während du scrollst (sonst springt die Seite). Gespeichert werden die letzten 5000 Posts, nur auf diesem Gerät.</div>
         <button type="button" class="txt" data-act="readreset">Gelesene Posts zurücksetzen</button>
 
         <h3>Darstellung</h3>
@@ -2409,6 +2427,7 @@
         readMode: $('readMode').value,
         readOnScroll: $('readOnScroll').checked,
         readHideReddit: $('readHideReddit').checked,
+        readScope: $('readScope').value,
         toolbarOpacity: (() => { const v = parseInt($('toolbarOpacity').value, 10); return isNaN(v) ? DEFAULTS.toolbarOpacity : Math.min(100, Math.max(0, v)); })(),
         toolbarBlur: (() => { const v = parseInt($('toolbarBlur').value, 10); return isNaN(v) ? DEFAULTS.toolbarBlur : Math.min(60, Math.max(0, v)); })(),
         commentGap: (() => { const v = parseInt($('commentGap').value, 10); return isNaN(v) ? DEFAULTS.commentGap : Math.min(40, Math.max(0, v)); })(),
